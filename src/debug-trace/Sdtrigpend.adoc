@@ -1,0 +1,90 @@
+[[ext:sdtrigpend]]
+=== ext:sdtrigpend[] Trigger Pending ISA Extension
+
+The Sdtrig v1.0 spec defines a series of trigger types, but only one
+(`icount`) includes a pending bit.  This bit allows separation of trigger
+match from trigger action, by allowing the action to be pended until it
+can be taken. From section 5.7.12 of the RISC-V Debug specification v1.0:
+
+> The intent of pending is to cleanly handle the case where action is 0, m is 0, u is 1, count is
+> 1, and the U-mode instruction being executed causes a trap into M-mode. In that case we
+> want the entire M-mode handler to be executed, and the debug trap to be taken before the
+> next U-mode instruction.
+
+This extension extends the use of pending bits to all trigger types.  The
+value for other triggers is similar, it allows trigger actions to be taken
+when possible rather than being dropped, as they are in some cases without
+this extension.  Some scenarios where the new pending bits will resolve
+existing issues follow.
+
+- An `mcontrol6` trigger with timing=after matches a load or store access,
+  but the matching instruction later traps to a mode in which the trigger
+  is not enabled.
+- As noted in the RISC-V Debug specification v1.0, section 5.4, describing
+  options for avoiding exception reentrancy: Both options prevent etrigger
+  and itrigger from having any effect on exceptions and interrupts that
+  are handled in M-mode. They also prevent triggering during some initial
+  portion of each handler. Debuggers should use other mechanisms to debug
+  these cases, such as patching the handler or setting a breakpoint on the
+  instruction after MIE is cleared.
+- As noted in the RISC-V Debug specification v1.0, section 5.7.16,
+  referring to external triggers: An implementation may either ignore the
+  signal altogether when it cannot fire (dropping the trigger event) or it
+  may hold the action as pending and fire the trigger once it is legal to
+  do so.
+
+In each case, the pending bits will provide a standard way to allow the
+trigger to fire, or take the trigger action, when software execution returns
+to a privilege mode and context in which the trigger is enabled.  The pending
+bits also ensure that any pending trigger action can be saved and restored
+during context switch.
+
+Finally, the pending bits simplify emulation of operations on behalf of less
+privileged code.  If the emulated operation matches a trigger established by
+the less privileged code, e.g. because Sdtrigepm is implemented and the
+access was performed with HLV/HSV or mstatus.MPRV=1, the action can be
+pended until the less privileged code is resumed.  If the emulator has to
+emulate a trigger match, it can simply set the pending bit rather than
+having to emulate the trigger action.  This is critical for triggers with
+action=1, as debug mode entry cannot be emulated.
+
+==== CSRs
+
+===== Match Control Type 6 (mcontrol6)
+
+Bit 19 in `mcontrol6` is the pending bit.
+
+===== Exception/Interrupt Trigger (etrigger/itrigger)
+
+Bit 13 in `etrigger` and `itrigger` is the pending bit.
+
+===== External Trigger (tmexttrigger)
+
+Bit 23 in `tmexttrigger` is the pending bit.
+
+==== Trigger Action Pending
+
+For each trigger type, pending is set, and the hit field updated, when the
+trigger matches.  When pending is set, the trigger will fire once the hart
+is in a mode where the trigger is enabled, before any other instructions in
+that mode retire. The pending bit is cleared by hardware when the trigger
+fires.  Because trigger match and trigger action can be simultaneous,
+pending=1 is not always observable.
+
+A pending trigger action should be treated as highest priority, as defined
+in Table 13 in the RISC-V Debug specification v1.0.
+
+The exception reentrancy mechanisms described in the RISC-V Debug
+specification v1.0 are modified.  When `tcontrol`.mte=1, or when interrupts
+are disabled by setting `xstatus`.xIE=0 while breakpoint exceptions are
+delegated to privilege mode x, triggers can match, though they will set
+pending rather than firing.
+
+Only instructions that retire or trap update the pending and hit bits;
+these fields are not updated speculatively.  If the instruction sets
+pending=1 but traps before the trigger fires, hit should be set to
+"before".  If the instruction sets pending=1 and retires before the trigger
+fires, hit should be set to "immediately after" or "after".  "Immediately
+after" applies only if no younger instructions have retired (and hence no
+younger instructions will retire before the trigger fires), otherwise hit
+should be set to "after".
